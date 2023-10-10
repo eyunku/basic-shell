@@ -71,7 +71,6 @@ int runargs(int npipe, Job *job) {
         }
         killJob(job->id);
     } else if (!strcmp(job->cmds[0][1], "jobs")) {
-        // printf("running jobs\n");
         for (int i = 1; i < MAX_JOBS; i++) {
             if (i == job->id) continue; // don't print jobs as it runs (it is in fg)
             if (jobs[i] != NULL && !jobs[i]->foreground) {
