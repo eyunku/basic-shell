@@ -5,59 +5,85 @@
 #define EXIT_CHILD 0
 
 /**
- * Executes a single command with nargs arguments
+ * Spawns a child process and assigns it the process ID of the group it belongs to.
+ * Each line passed into the shell should only create a single process with a single
+ * gpid. The gpid for the group will be equivalent to the pid of the first child process
+ * spawned, that is, the first cmd in the list of cmds.
+*/
+int runarg(pid_t gpid, int fdin, int fdout, char *args[]) {
+    pid_t pid;
+    if ((pid = fork()) == 0) { // only true if we're a child process
+        if (fdin != fileno(stdin)) {
+            dup2(fdin, fileno(stdin));
+            close(fdin);
+        }
+
+        if (fdout != fileno(stdout)) {
+            dup2(fdout, fileno(stdout));
+            close(fdout);
+        }
+
+        return execvp(args[0], args);
+    }
+    return pid;
+}
+
+/**
+ * Executes a single line passed into the shell, after being preprocssed
+ * by the readline function
  * 
  * Parameters:
- *  nargs (int): number of arguments
- *  args (char*[]): arguments, as an array of strings.
- *                  first arg is the cmd.
+ *  cmds (char**[]): array of commands representing the set of cmds 
+ *                   piped into one another, parsed from the input line
  * 
  * Returns:
  *  int: -1 on error, 1 if shell should be clean exited, 0 otherwise
- *          special case: 2 if output was written to
 */
-int runargs(int nargs, char *args[], char* output) {
-    printf("cmd passed in is %s\n", args[0]);
+int runargs(int npipe, char **cmds[]) {
+    // NOTE: the 0th element of each cmd is the number of arguments 
+
     // check for built-in commands
-    if (!strcmp(args[0], "exit")) {
+    printf("first command passed in is: %s, number of args for first command is %d\n", cmds[0][1], cmds[0][0][0]);
+    if (!strcmp(cmds[0][1], "exit")) {
         return 1;
-    } else if (!strcmp(args[0], "cd")) {
-        if (nargs == 0 || nargs > 1 || chdir(args[1])) {
+    } else if (!strcmp(cmds[0][1], "cd")) {
+        if (cmds[0][0][0] == 0 || cmds[0][0][0] > 1 || chdir(cmds[0][2])) {
             return EXIT_CHILD;
         }
-    } else if (!strcmp(args[0], "jobs")) {
+    } else if (!strcmp(cmds[0][1], "jobs")) {
 
-    } else if (!strcmp(args[0], "fg")) {
-        if (nargs != 0 && nargs != 1) {
-            return EXIT_CHILD;
-        }
+    } else if (!strcmp(cmds[0][1], "fg")) {
 
-    } else if (!strcmp(args[0], "bg")) {
+    } else if (!strcmp(cmds[0][1], "bg")) {
 
-    } else { // no build-in command found, search bin
-        // create executable path
-        char exepath[BUFFER_SIZE] = "/bin/";
-        strcat(exepath, args[0]);
-
-        if (access(exepath, X_OK) < 0) {
-            printf("No execute permission for %s\n", args[0]);
-            return EXIT_CHILD;
-        }
-
-        // fork into a child process
-        pid_t pid = fork();
-        if (pid < 0) {
-            printf("Unable to create child process\n");
-            return EXIT_CHILD;
-        }
+    } else { // no build-in command found
+        pid_t pid; // process id to differentiate from root child and parent (shell)
+        pid_t gpid; // group process id, defined using the pid of the first process called
+        int fdin = fileno(stdin); // initialize to read from stdin
+        int fd[2]; // keep track of fdin and fdout for each process
+        
+        // create root child process
+        if (pipe(fd) < 0) { printf("Pipe creation failed\n"); return EXIT_CHILD; }
+        pid = fork();
 
         // if child process successfully created, check if process is parent or child
         if (pid == 0) { // we're the child process!
-            // execvp wipes memory, so we don't need to free line or args
-            if (execvp(args[0], args) < 0) {
-                printf("Error executing %s\n", args[0]);
-                return EXIT_CHILD;
+            int i;
+            gpid = getpid();
+            printf("gpid: %d\n", gpid);
+            for (i = 0; i < npipe; ++i) {
+                if (pipe(fd) < 0) { printf("Pipe creation failed\n"); return EXIT_CHILD; }
+                // carry the write in into the read
+                runarg(gpid, fdin, fd[1], &(cmds[i][1]));
+                // close write end of pipe
+                close(fd[1]);
+                // keep read end of pipe, next child will read from here
+                fdin = fd[0];
             }
+            if (fdin != fileno(stdin)) dup2(fdin, fileno(stdin));
+            
+            // execvp clears memory space, so no frees are needed
+            execvp(cmds[i][1], &(cmds[i][1]));
         } else { // we're the parent process
             int stat;
             wait(&stat);
@@ -137,9 +163,9 @@ int readline(FILE* stream) {
 
     // TODO: remove
     // test print to show what parsed cmd & args are
-    for (int i = 0; i < maxArgs; i++) {
-        printf("arg %d is: %s\n", i, args[i]);
-    }
+    // for (int i = 0; i < maxArgs; i++) {
+    //     printf("arg %d is: %s\n", i, args[i]);
+    // }
 
     // parse pipe characters so that args can be piped
     int npipe = 0;
@@ -174,7 +200,7 @@ int readline(FILE* stream) {
                 return -1;
             }
             cmds[cmd][cmdArg + 1] = NULL;
-            cmds[cmd++][0][0] = cmdArg; // store # of args for cmd in 0 index
+            cmds[cmd++][0][0] = cmdArg - 1; // store # of args for cmd in 0 index
             cmdArg = 0;
             arg++;
         }
@@ -183,24 +209,19 @@ int readline(FILE* stream) {
     }
     // write null terminator and number of args for last arg (won't have pipe)
     cmds[cmd][cmdArg + 1] = NULL;
-    cmds[cmd++][0][0] = cmdArg;
+    cmds[cmd++][0][0] = cmdArg - 1;
 
     // TODO: remove
     // test print to see if pipes are being parsed properly
-    for (int i = 0; i < npipe + 1; i++) {
-        printf("number of args: %d\n", cmds[i][0][0]);
-        for (int j = 0; j < maxArgs; j++) {
-            printf("(%d) arg %d is: %s\n", i, j, cmds[i][j]);
-        }
-    }
+    // for (int i = 0; i < npipe + 1; i++) {
+    //     printf("number of args: %d\n", cmds[i][0][0]);
+    //     for (int j = 0; j < maxArgs; j++) {
+    //         printf("(%d) arg %d is: %s\n", i, j, cmds[i][j]);
+    //     }
+    // }
 
     // call cmd list
-    for (cmd = 0; cmd < npipe + 1; cmd++) {
-        int err;
-        char output;
-        err = runargs(cmds[cmd][0][0] - 1, &(cmds[cmd][1]), &output);
-        return err;
-    }
+    int err = runargs(npipe, cmds);
 
     // free all line parsing variables
     free(line); 
@@ -214,9 +235,15 @@ int readline(FILE* stream) {
     }
     free(cmds);
 
-    return 0;
+    return err;
 }
 
+/**
+ * Creates an interactive shell environment
+ * 
+ * Returns:
+ *  int: exit status
+*/
 int interactive(void) {
     // print initial prompt
     printf("wsh> ");
@@ -231,6 +258,15 @@ int interactive(void) {
     return 0;
 }
 
+/**
+ * Runs a batch file through a shell environment
+ * 
+ * Parameters:
+ *  filename (char*): path to batch file
+ * 
+ * Returns:
+ *  int: exit status
+*/
 int batch(char* filename) {
     FILE *fp;
     if ((fp = fopen(filename, "r")) == NULL) { printf("Unable to open batch file\n"); return -1; }
