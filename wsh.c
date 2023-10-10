@@ -16,7 +16,6 @@ pid_t shell;
  *  id (int): the id of the job
 */
 void killJob(int id) {
-    printf("attempting to kill job %d\n", id);
     for (int i = 0; i < jobs[id]->maxArgs; i++) free(jobs[id]->args[i]);
     free(jobs[id]->args);
     for (int i = 0; i < jobs[id]->npipe + 1; i++) {
@@ -41,10 +40,8 @@ void killZombies() {
             continue;
         }
         if (WIFEXITED(stat)) { // job completed
-            printf("Job %d was terminated\n", jobs[i]->id);
             killJob(jobs[i]->id);
         }
-        // if (WIFSIGNALED(stat)) printf("child was terminated by a signal\n");
     }
 }
 
@@ -52,10 +49,6 @@ void killZombies() {
  * Empty signal handler so that a process can ignore a signal
 */
 void sigHandler() {}
-
-void sigtstpHandler() {
-    printf("handled\n");
-}
 
 /**
  * Executes a single line passed into the shell, after being preprocssed
@@ -71,7 +64,6 @@ void sigtstpHandler() {
 int runargs(int npipe, Job *job) {
     // check for built-in commands
     // since built-in commands don't create a process, they immediately become zombies and must be killed
-    // printf("first command passed in is: %s, number of args for first command is %d\n", cmds[0][1], cmds[0][0][0]);
     if (!strcmp(job->cmds[0][1], "exit")) {
         killJob(job->id);
         return 1;
@@ -95,23 +87,87 @@ int runargs(int npipe, Job *job) {
         killJob(job->id);
     } else if (!strcmp(job->cmds[0][1], "fg")) {
         if (job->cmds[0][0][0] == 0) { // 0 args
-
-        } else if (job->cmds[0][0][0] == 1) { // 1 args
-            printf("index of job to bring into fg: %d\n", job->cmds[0][2][0]);
-            Job *fgJob = jobs[(int)job->cmds[0][2][0]];
+            // find largest job id
+            Job *fgJob = NULL;
+            for (int i = MAX_JOBS - 1; i > 0; i--) {
+                if (jobs[i] != NULL && !jobs[i]->foreground) {
+                    fgJob = jobs[i];
+                    break;
+                }
+            }
+            if (fgJob == NULL) {
+                printf("No jobs found\n");
+                killJob(job->id);
+                return EXIT_CHILD;
+            }
+            // continue job and bring to foreground
             kill(-fgJob->pgid, SIGCONT);
-            // give control of terminal to foreground job
             tcsetpgrp(fileno(stdin), fgJob->pgid);
             int stat;
             waitpid(-fgJob->pgid, &stat, WUNTRACED);
-            killJob(job->id);
             // reassign control of terminal to shell
             tcsetpgrp(fileno(stdin), getpgid(shell));
+            fgJob = NULL;
+        } else if (job->cmds[0][0][0] == 1) { // 1 args
+            // fetch relevant job
+            Job *fgJob = jobs[atoi(job->args[1])];
+            if (fgJob == NULL) {
+                printf("Job does not exist\n");
+                killJob(job->id);
+                return EXIT_CHILD;
+            } else if (fgJob->foreground) {
+                printf("Job is already in foreground\n");
+                killJob(job->id);
+                return EXIT_CHILD;
+            }
+            // continue job and bring to foreground
+            kill(-fgJob->pgid, SIGCONT);
+            tcsetpgrp(fileno(stdin), fgJob->pgid);
+            int stat;
+            waitpid(-fgJob->pgid, &stat, WUNTRACED);
+            // reassign control of terminal to shell
+            tcsetpgrp(fileno(stdin), getpgid(shell));
+            fgJob = NULL;
         } else {
             printf("fg requires either 0 or 1 arg\n");
+            killJob(job->id);
             return EXIT_CHILD;
         }
+        killJob(job->id);
     } else if (!strcmp(job->cmds[0][1], "bg")) {
+        if (job->cmds[0][0][0] == 0) {
+            Job *bgJob = NULL;;
+            for (int i = MAX_JOBS - 1; i > 0; i--) {
+                if (jobs[i] != NULL && jobs[i]->foreground) {
+                    bgJob = jobs[i];
+                    break;
+                }
+            }
+            if (bgJob == NULL) {
+                printf("No jobs found\n");
+                killJob(job->id);
+                return EXIT_CHILD;
+            }
+            // move job to background
+            bgJob->foreground = false;
+            tcsetpgrp(fileno(stdin), getpgid(shell));
+            bgJob = NULL;
+        } else if (job->cmds[0][0][0] == 1) {
+            Job *bgJob = jobs[atoi(job->args[1])];
+            if (bgJob == NULL) {
+                printf("Job does not exist\n");
+                killJob(job->id);
+                return EXIT_CHILD;
+            } else if (!bgJob->foreground) {
+                printf("Job is already in the background\n");
+                killJob(job->id);
+                return EXIT_CHILD;
+            }
+            // move job to background
+            bgJob->foreground = false;
+            tcsetpgrp(fileno(stdin), getpgid(shell));
+            bgJob = NULL;
+        }
         killJob(job->id);
     } else { // no build-in command found
         pid_t pid; // process id to differentiate from root child and parent (shell)
@@ -162,7 +218,6 @@ int runargs(int npipe, Job *job) {
             tcsetpgrp(fileno(stdin), job->pgid);
             int stat;
             waitpid(-pgid, &stat, WUNTRACED);
-            killJob(job->id);
         }
         // reassign control of terminal to shell
         tcsetpgrp(fileno(stdin), getpgid(shell));
@@ -246,7 +301,6 @@ int readline(FILE* stream) {
     int assigned = false;
     for (int i = 1; i < MAX_JOBS; i++) {
         if (jobs[i] == NULL && !assigned) {
-            printf("Assigning job %s ID %d\n", job->args[0], i);
             job->id = i;
             jobs[i] = job;
             assigned = true;
@@ -340,7 +394,6 @@ int interactive(void) {
         int err;
         if ((err = readline(stdin)) < 0) return -1;
         else if (err == 1) return 0;
-        // printf("Attempting to kill zombie processes\n");
         killZombies();
         printf("wsh> ");
     }
