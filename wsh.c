@@ -6,6 +6,9 @@
 // initialize jobs with all null pointers
 Job *jobs[MAX_JOBS] = {NULL, };
 
+// pid of shell
+pid_t shell;
+
 /**
  * Kills a job with a given id.
  * 
@@ -45,6 +48,9 @@ void killZombies() {
     }
 }
 
+/**
+ * Empty signal handler so that a process can ignore a signal
+*/
 void sigHandler() {}
 
 void sigtstpHandler() {
@@ -70,14 +76,15 @@ int runargs(int npipe, Job *job) {
         killJob(job->id);
         return 1;
     } else if (!strcmp(job->cmds[0][1], "cd")) {
-        killJob(job->id);
         if (job->cmds[0][0][0] == 0 || job->cmds[0][0][0] > 1 || chdir(job->cmds[0][2])) {
+            killJob(job->id);
             return EXIT_CHILD;
         }
-    } else if (!strcmp(job->cmds[0][1], "jobs")) {
         killJob(job->id);
+    } else if (!strcmp(job->cmds[0][1], "jobs")) {
         // printf("running jobs\n");
         for (int i = 1; i < MAX_JOBS; i++) {
+            if (i == job->id) continue; // don't print jobs as it runs (it is in fg)
             if (jobs[i] != NULL && !jobs[i]->foreground) {
                 printf("%d:", jobs[i]->id);
                 int arg = 0;
@@ -85,9 +92,25 @@ int runargs(int npipe, Job *job) {
                 printf("\n");
             }
         }
-    } else if (!strcmp(job->cmds[0][1], "fg")) {
         killJob(job->id);
+    } else if (!strcmp(job->cmds[0][1], "fg")) {
+        if (job->cmds[0][0][0] == 0) { // 0 args
 
+        } else if (job->cmds[0][0][0] == 1) { // 1 args
+            printf("index of job to bring into fg: %d\n", job->cmds[0][2][0]);
+            Job *fgJob = jobs[(int)job->cmds[0][2][0]];
+            kill(-fgJob->pgid, SIGCONT);
+            // give control of terminal to foreground job
+            tcsetpgrp(fileno(stdin), fgJob->pgid);
+            int stat;
+            waitpid(-fgJob->pgid, &stat, WUNTRACED);
+            killJob(job->id);
+            // reassign control of terminal to shell
+            tcsetpgrp(fileno(stdin), getpgid(shell));
+        } else {
+            printf("fg requires either 0 or 1 arg\n");
+            return EXIT_CHILD;
+        }
     } else if (!strcmp(job->cmds[0][1], "bg")) {
         killJob(job->id);
     } else { // no build-in command found
@@ -139,9 +162,10 @@ int runargs(int npipe, Job *job) {
             tcsetpgrp(fileno(stdin), job->pgid);
             int stat;
             waitpid(-pgid, &stat, WUNTRACED);
+            killJob(job->id);
         }
         // reassign control of terminal to shell
-        tcsetpgrp(fileno(stdin), getpgid(getpid()));
+        tcsetpgrp(fileno(stdin), getpgid(shell));
     }
     return 0;
 }
@@ -348,7 +372,8 @@ int batch(char* filename) {
 }
 
 int main(int argc, char *argv[]) {
-    printf("PID of shell: %d\n", getpid());
+    shell = getpid();
+    printf("PID of shell: %d\n", shell);
     // set up signal handlers
     signal(SIGTTOU, SIG_IGN);
     signal(SIGINT, sigHandler);
