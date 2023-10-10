@@ -26,6 +26,11 @@ typedef struct Job {
     char ***cmds; // parsed cmds
 } Job;
 
+void killJob();
+void killZombies();
+void sigHandler();
+int runargs(int npipe, Job *job);
+int readline(FILE* stream);
 int interactive(void);
 int batch(char* filename);
 

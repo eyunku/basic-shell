@@ -36,7 +36,6 @@ void killZombies() {
         if (jobs[i] == NULL) continue;
         int stat;
         if (!waitpid(-jobs[i]->pgid, &stat, WNOHANG)) { // if return value is 0
-            // printf("NOHANG triggered\n");
             continue;
         }
         if (WIFEXITED(stat)) { // job completed
@@ -150,7 +149,7 @@ int runargs(int npipe, Job *job) {
             }
             // move job to background
             bgJob->foreground = false;
-            tcsetpgrp(fileno(stdin), getpgid(shell));
+            kill(bgJob->pgid, SIGCONT);
             bgJob = NULL;
         } else if (job->cmds[0][0][0] == 1) {
             Job *bgJob = jobs[atoi(job->args[1])];
@@ -158,15 +157,15 @@ int runargs(int npipe, Job *job) {
                 printf("Job does not exist\n");
                 killJob(job->id);
                 return EXIT_CHILD;
-            } else if (!bgJob->foreground) {
-                printf("Job is already in the background\n");
-                killJob(job->id);
-                return EXIT_CHILD;
             }
             // move job to background
             bgJob->foreground = false;
-            tcsetpgrp(fileno(stdin), getpgid(shell));
+            kill(bgJob->pgid, SIGCONT);
             bgJob = NULL;
+        } else {
+            printf("bg requires either 0 or 1 arg\n");
+            killJob(job->id);
+            return EXIT_CHILD;
         }
         killJob(job->id);
     } else { // no build-in command found
@@ -217,7 +216,8 @@ int runargs(int npipe, Job *job) {
             // give control of terminal to the foreground process
             tcsetpgrp(fileno(stdin), job->pgid);
             int stat;
-            waitpid(-pgid, &stat, WUNTRACED);
+            // wait for all children of process group to finish (waitpid only waits for one)
+            for (int i = 0; i < npipe + 1; i++) waitpid(-pgid, &stat, WUNTRACED);
         }
         // reassign control of terminal to shell
         tcsetpgrp(fileno(stdin), getpgid(shell));
@@ -289,12 +289,6 @@ int readline(FILE* stream) {
     }
     job->args[nargs + 1] = NULL;
 
-    // TODO: remove
-    // test print to show what parsed cmd & args are
-    // for (int i = 0; i < maxArgs; i++) {
-    //     printf("arg %d is: %s\n", i, job->args[i]);
-    // }
-
     if (!strcmp(job->args[nargs], "&")) job->foreground = false;
     else job->foreground = true;
     // assign the process an id and send any foreground job to background
@@ -351,17 +345,6 @@ int readline(FILE* stream) {
     job->npipe = npipe;
     job->maxArgs = maxArgs;
 
-    // TODO: remove
-    // test print to see if pipes are being parsed properly
-    // for (int i = 0; i < npipe + 1; i++) {
-    //     printf("number of args: %d\n", job->cmds[i][0][0]);
-    //     for (int j = 0; j < maxArgs; j++) {
-    //         printf("(%d) arg %d is: %s\n", i, j, job->cmds[i][j]);
-    //     }
-    // }
-
-    // printf("The PID of the shell is: %d\n", getpid());
-
     // call cmd list
     int err = runargs(npipe, job);
 
@@ -383,12 +366,6 @@ int readline(FILE* stream) {
 int interactive(void) {
     // print initial prompt
     printf("wsh> ");
-
-    // struct sigaction sa;
-    // sigaction(SIGCHLD, &sa, NULL);
-    // sa.sa_handler = killChild;
-    // signal(SIGCHLD, SIG_IGN);
-
 
     while (true) {
         int err;
@@ -425,15 +402,14 @@ int batch(char* filename) {
 }
 
 int main(int argc, char *argv[]) {
-    shell = getpid();
-    printf("PID of shell: %d\n", shell);
     // set up signal handlers
     signal(SIGTTOU, SIG_IGN);
     signal(SIGINT, sigHandler);
     signal(SIGTSTP, sigHandler);
     // assign current process (what will be the shell) as root process
+    shell = getpid();
     setpgid(0, 0);
-    tcsetpgrp(fileno(stdin), getpid());
+    tcsetpgrp(fileno(stdin), shell);
     
     if (argc == 1) exit(interactive());
     else if (argc == 2) exit(batch(argv[1]));
