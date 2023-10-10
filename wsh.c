@@ -1,8 +1,5 @@
 #include "wsh.h"
 
-// controls if an failure on a child process exits the shell: 0 if no, -1 if yes
-#define EXIT_CHILD 0
-
 // initialize jobs with all null pointers
 Job *jobs[MAX_JOBS] = {NULL, };
 
@@ -54,8 +51,9 @@ void sigHandler() {}
  * by the readline function
  * 
  * Parameters:
- *  cmds (char**[]): array of commands representing the set of cmds 
- *                   piped into one another, parsed from the input line
+ *  npipe (int): number of pipes that were detected, relates to number of jobs
+ *               (likely better to pass in njobs = npipe + 1)
+ *  job (Job*): pointer to struct representing the job to run the arguments for
  * 
  * Returns:
  *  int: -1 on error, 1 if shell should be clean exited, 0 otherwise

@@ -16,6 +16,9 @@
 #define false 0
 #define true 1
 
+// controls if an failure on a child process exits the shell: 0 if no, -1 if yes
+#define EXIT_CHILD 0
+
 typedef struct Job {
     int maxArgs;
     int npipe;
