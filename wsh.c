@@ -3,6 +3,7 @@
 // controls if an failure on a child process exits the shell: 0 if no, -1 if yes
 #define EXIT_CHILD 0
 
+// initialize jobs with all null pointers
 Job *jobs[MAX_JOBS] = {NULL, };
 
 /**
@@ -12,6 +13,7 @@ Job *jobs[MAX_JOBS] = {NULL, };
  *  id (int): the id of the job
 */
 void killJob(int id) {
+    printf("attempting to kill job %d\n", id);
     for (int i = 0; i < jobs[id]->maxArgs; i++) free(jobs[id]->args[i]);
     free(jobs[id]->args);
     for (int i = 0; i < jobs[id]->npipe + 1; i++) {
@@ -19,7 +21,34 @@ void killJob(int id) {
         free(jobs[id]->cmds[i]);
     }
     free(jobs[id]->cmds);
+    free(jobs[id]);
     jobs[id] = NULL;
+}
+
+/**
+ * Check all jobs to see if they've completed. If they have,
+ * clear the job from the job array (that is, remove all zombie processes)
+*/
+void killZombies() {
+    for (int i = 1; i < MAX_JOBS; i++) {
+        if (jobs[i] == NULL) continue;
+        int stat;
+        if (!waitpid(-jobs[i]->pgid, &stat, WNOHANG)) { // if return value is 0
+            // printf("NOHANG triggered\n");
+            continue;
+        }
+        if (WIFEXITED(stat)) { // job completed
+            printf("Job %d was terminated\n", jobs[i]->id);
+            killJob(jobs[i]->id);
+        }
+        // if (WIFSIGNALED(stat)) printf("child was terminated by a signal\n");
+    }
+}
+
+void sigHandler() {}
+
+void sigtstpHandler() {
+    printf("handled\n");
 }
 
 /**
@@ -34,23 +63,33 @@ void killJob(int id) {
  *  int: -1 on error, 1 if shell should be clean exited, 0 otherwise
 */
 int runargs(int npipe, Job *job) {
-    // NOTE: the 0th element of each cmd is the number of arguments 
-
     // check for built-in commands
+    // since built-in commands don't create a process, they immediately become zombies and must be killed
     // printf("first command passed in is: %s, number of args for first command is %d\n", cmds[0][1], cmds[0][0][0]);
     if (!strcmp(job->cmds[0][1], "exit")) {
         killJob(job->id);
         return 1;
     } else if (!strcmp(job->cmds[0][1], "cd")) {
+        killJob(job->id);
         if (job->cmds[0][0][0] == 0 || job->cmds[0][0][0] > 1 || chdir(job->cmds[0][2])) {
             return EXIT_CHILD;
         }
     } else if (!strcmp(job->cmds[0][1], "jobs")) {
-
+        killJob(job->id);
+        // printf("running jobs\n");
+        for (int i = 1; i < MAX_JOBS; i++) {
+            if (jobs[i] != NULL && !jobs[i]->foreground) {
+                printf("%d:", jobs[i]->id);
+                int arg = 0;
+                while (jobs[i]->args[arg] != NULL) { printf(" %s", jobs[i]->args[arg++]); }
+                printf("\n");
+            }
+        }
     } else if (!strcmp(job->cmds[0][1], "fg")) {
+        killJob(job->id);
 
     } else if (!strcmp(job->cmds[0][1], "bg")) {
-
+        killJob(job->id);
     } else { // no build-in command found
         pid_t pid; // process id to differentiate from root child and parent (shell)
         pid_t pgid = 0; // process group id, defined using the pid of the first process called
@@ -79,11 +118,7 @@ int runargs(int npipe, Job *job) {
             } else if (pid < 0) {
                 printf("Fork failed\n");
             } else {
-                // if (job->foreground) {
-                //     int stat;
-                //     printf("the pid is %d\n", pid);
-                //     waitpid(pid, &stat, WUNTRACED | WNOHANG);
-                // }
+                // set pgid of process group to pid of root child
                 if (i == 0) {
                     pgid = pid;
                     job->pgid = pid;
@@ -98,7 +133,15 @@ int runargs(int npipe, Job *job) {
             }   
         }
 
-        
+        // wait for child, only if process in foreground
+        if (job->foreground) {
+            // give control of terminal to the foreground process
+            tcsetpgrp(fileno(stdin), job->pgid);
+            int stat;
+            waitpid(-pgid, &stat, WUNTRACED);
+        }
+        // reassign control of terminal to shell
+        tcsetpgrp(fileno(stdin), getpgid(getpid()));
     }
     return 0;
 }
@@ -175,12 +218,16 @@ int readline(FILE* stream) {
 
     if (!strcmp(job->args[nargs], "&")) job->foreground = false;
     else job->foreground = true;
-    // assign the process an id and send other processes to background as necessary
-    for (int i = 0; i < MAX_JOBS; i++) {
-        if (job->foreground && jobs[i] != NULL) jobs[i]->foreground = false;
-        if (jobs[i] == NULL) {
+    // assign the process an id and send any foreground job to background
+    int assigned = false;
+    for (int i = 1; i < MAX_JOBS; i++) {
+        if (jobs[i] == NULL && !assigned) {
+            printf("Assigning job %s ID %d\n", job->args[0], i);
             job->id = i;
             jobs[i] = job;
+            assigned = true;
+        } else if (jobs[i] != NULL && jobs[i]->foreground) {
+            jobs[i]->foreground = false;
         }
     }
 
@@ -200,6 +247,7 @@ int readline(FILE* stream) {
     int cmdArg = 0; // which arg of this cmd we're on
     while (job->args[arg] != NULL) {
         // if (args[arg + 1] == NULL) printf("next is null\n");
+        if (!strcmp(job->args[arg], "&") && arg == nargs) break;
         if (!strcmp(job->args[arg], "|")) {
             if (arg == nargs) { // last arg is a pipe
                 printf("Pipe has no target\n");
@@ -221,6 +269,10 @@ int readline(FILE* stream) {
     job->cmds[cmd][cmdArg + 1] = NULL;
     job->cmds[cmd++][0][0] = cmdArg - 1;
 
+    // write other relevant information to job array
+    job->npipe = npipe;
+    job->maxArgs = maxArgs;
+
     // TODO: remove
     // test print to see if pipes are being parsed properly
     // for (int i = 0; i < npipe + 1; i++) {
@@ -230,13 +282,14 @@ int readline(FILE* stream) {
     //     }
     // }
 
-    printf("The PID of the shell is: %d\n", getpid());
+    // printf("The PID of the shell is: %d\n", getpid());
 
     // call cmd list
     int err = runargs(npipe, job);
 
     // free line parser
     free(line); 
+    // job is pointed to by pointer in jobs array, unassign job pointer
     job = NULL;
     free(job);
 
@@ -253,10 +306,18 @@ int interactive(void) {
     // print initial prompt
     printf("wsh> ");
 
+    // struct sigaction sa;
+    // sigaction(SIGCHLD, &sa, NULL);
+    // sa.sa_handler = killChild;
+    // signal(SIGCHLD, SIG_IGN);
+
+
     while (true) {
         int err;
         if ((err = readline(stdin)) < 0) return -1;
         else if (err == 1) return 0;
+        // printf("Attempting to kill zombie processes\n");
+        killZombies();
         printf("wsh> ");
     }
 
@@ -280,12 +341,22 @@ int batch(char* filename) {
         int err;
         if ((err = readline(fp)) < 0) return -1;
         else if (err == 1) return 0;
+        killZombies();
     }
 
     return 0;
 }
 
 int main(int argc, char *argv[]) {
+    printf("PID of shell: %d\n", getpid());
+    // set up signal handlers
+    signal(SIGTTOU, SIG_IGN);
+    signal(SIGINT, sigHandler);
+    signal(SIGTSTP, sigHandler);
+    // assign current process (what will be the shell) as root process
+    setpgid(0, 0);
+    tcsetpgrp(fileno(stdin), getpid());
+    
     if (argc == 1) exit(interactive());
     else if (argc == 2) exit(batch(argv[1]));
 }
