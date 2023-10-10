@@ -17,6 +17,7 @@
  *          special case: 2 if output was written to
 */
 int runargs(int nargs, char *args[], char* output) {
+    printf("cmd passed in is %s\n", args[0]);
     // check for built-in commands
     if (!strcmp(args[0], "exit")) {
         return 1;
@@ -136,27 +137,27 @@ int readline(FILE* stream) {
 
     // TODO: remove
     // test print to show what parsed cmd & args are
-    // for (int i = 0; i < maxArgs; i++) {
-    //     printf("arg %d is: %s\n", i, args[i]);
-    // }
+    for (int i = 0; i < maxArgs; i++) {
+        printf("arg %d is: %s\n", i, args[i]);
+    }
 
     // parse pipe characters so that args can be piped
     int npipe = 0;
     for (int i = 0; i < nargs; i++) { if (!strcmp(args[i], "|")) npipe++; }
     char ***cmds = calloc(npipe + 1, sizeof(char**)); // # of cmds will always be # of pipes + 1
     for (int i = 0; i < npipe + 1; i++) {
-        // maximum # of args is nargs, +1 cmd, +1 for array size
-        cmds[i] = calloc(nargs + 2, sizeof(char*));
-        for (int j = 0; j < nargs + 2; j++) {
+        cmds[i] = calloc(maxArgs, sizeof(char*));
+        for (int j = 0; j < maxArgs; j++) {
             cmds[i][j] = calloc(BUFFER_SIZE, sizeof(char));
         }
     }
-    
+
     int arg = 0; // index of arg from args
     int cmd = 0; // which cmd we're on
     int cmdArg = 0; // which arg of this cmd we're on
+    printf("%d\n", arg);
     while (args[arg] != NULL) {
-        //if (args[arg + 1] == NULL) printf("next is null\n");
+        // if (args[arg + 1] == NULL) printf("next is null\n");
         if (!strcmp(args[arg], "|")) {
             if (arg == nargs) { // last arg is a pipe
                 printf("Pipe has no target\n");
@@ -165,13 +166,14 @@ int readline(FILE* stream) {
                 free(args);
                 for (int i = 0; i < npipe + 1; i++) {
                     free(cmds[i]);
-                    for (int j = 0; j < nargs; j++) {
+                    for (int j = 0; j < maxArgs; j++) {
                         free(cmds[i][j]);
                     }
                 }
                 free(cmds);
                 return -1;
             }
+            cmds[cmd][cmdArg + 1] = NULL;
             cmds[cmd++][0][0] = cmdArg; // store # of args for cmd in 0 index
             cmdArg = 0;
             arg++;
@@ -179,23 +181,33 @@ int readline(FILE* stream) {
         // reserve cmds[cmd][0] for # of args for that command
         strcpy(cmds[cmd][1 + cmdArg++], args[arg++]);
     }
-    // store # of args for last cmd (won't have pipe)
+    // write null terminator and number of args for last arg (won't have pipe)
+    cmds[cmd][cmdArg + 1] = NULL;
     cmds[cmd++][0][0] = cmdArg;
 
     // TODO: remove
     // test print to see if pipes are being parsed properly
-    // for (int i = 0; i < npipe + 1; i++) {
-    //     for (int j = 1; j <= cmds[i][0][0]; j++) {
-    //         printf("(%d) arg %d is: %s\n", i, j, cmds[i][j]);
-    //     }
-    // }
+    for (int i = 0; i < npipe + 1; i++) {
+        printf("number of args: %d\n", cmds[i][0][0]);
+        for (int j = 0; j < maxArgs; j++) {
+            printf("(%d) arg %d is: %s\n", i, j, cmds[i][j]);
+        }
+    }
+
+    // call cmd list
+    for (cmd = 0; cmd < npipe + 1; cmd++) {
+        int err;
+        char output;
+        err = runargs(cmds[cmd][0][0] - 1, &(cmds[cmd][1]), &output);
+        return err;
+    }
 
     // free all line parsing variables
     free(line); 
     for (int i = 0; i < maxArgs; i++) free(args[i]);
     free(args);
     for (int i = 0; i < npipe + 1; i++) {
-        for (int j = 0; j < nargs + 2; j++) {
+        for (int j = 0; j < maxArgs; j++) {
             free(cmds[i][j]);
         }
         free(cmds[i]);
