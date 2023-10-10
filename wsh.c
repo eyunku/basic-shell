@@ -1,31 +1,25 @@
 #include "wsh.h"
 
-// because it is unclear whether a child process should exit the whole shell or not
-// control the exit value here (0 for exit child only, -1 for exit shell)
+// controls if an failure on a child process exits the shell: 0 if no, -1 if yes
 #define EXIT_CHILD 0
 
+Job *jobs[MAX_JOBS] = {NULL, };
+
 /**
- * Spawns a child process and assigns it the process ID of the group it belongs to.
- * Each line passed into the shell should only create a single process with a single
- * gpid. The gpid for the group will be equivalent to the pid of the first child process
- * spawned, that is, the first cmd in the list of cmds.
+ * Kills a job with a given id.
+ * 
+ * Parameters:
+ *  id (int): the id of the job
 */
-int runarg(pid_t gpid, int fdin, int fdout, char *args[]) {
-    pid_t pid;
-    if ((pid = fork()) == 0) { // only true if we're a child process
-        if (fdin != fileno(stdin)) {
-            dup2(fdin, fileno(stdin));
-            close(fdin);
-        }
-
-        if (fdout != fileno(stdout)) {
-            dup2(fdout, fileno(stdout));
-            close(fdout);
-        }
-
-        return execvp(args[0], args);
+void killJob(int id) {
+    for (int i = 0; i < jobs[id]->maxArgs; i++) free(jobs[id]->args[i]);
+    free(jobs[id]->args);
+    for (int i = 0; i < jobs[id]->npipe + 1; i++) {
+        for (int j = 0; j < jobs[id]->maxArgs; j++) free(jobs[id]->cmds[i][j]);
+        free(jobs[id]->cmds[i]);
     }
-    return pid;
+    free(jobs[id]->cmds);
+    jobs[id] = NULL;
 }
 
 /**
@@ -39,59 +33,72 @@ int runarg(pid_t gpid, int fdin, int fdout, char *args[]) {
  * Returns:
  *  int: -1 on error, 1 if shell should be clean exited, 0 otherwise
 */
-int runargs(int npipe, char **cmds[]) {
+int runargs(int npipe, Job *job) {
     // NOTE: the 0th element of each cmd is the number of arguments 
 
     // check for built-in commands
-    printf("first command passed in is: %s, number of args for first command is %d\n", cmds[0][1], cmds[0][0][0]);
-    if (!strcmp(cmds[0][1], "exit")) {
+    // printf("first command passed in is: %s, number of args for first command is %d\n", cmds[0][1], cmds[0][0][0]);
+    if (!strcmp(job->cmds[0][1], "exit")) {
+        killJob(job->id);
         return 1;
-    } else if (!strcmp(cmds[0][1], "cd")) {
-        if (cmds[0][0][0] == 0 || cmds[0][0][0] > 1 || chdir(cmds[0][2])) {
+    } else if (!strcmp(job->cmds[0][1], "cd")) {
+        if (job->cmds[0][0][0] == 0 || job->cmds[0][0][0] > 1 || chdir(job->cmds[0][2])) {
             return EXIT_CHILD;
         }
-    } else if (!strcmp(cmds[0][1], "jobs")) {
+    } else if (!strcmp(job->cmds[0][1], "jobs")) {
 
-    } else if (!strcmp(cmds[0][1], "fg")) {
+    } else if (!strcmp(job->cmds[0][1], "fg")) {
 
-    } else if (!strcmp(cmds[0][1], "bg")) {
+    } else if (!strcmp(job->cmds[0][1], "bg")) {
 
     } else { // no build-in command found
         pid_t pid; // process id to differentiate from root child and parent (shell)
-        pid_t gpid; // group process id, defined using the pid of the first process called
+        pid_t pgid = 0; // process group id, defined using the pid of the first process called
         int fdin = fileno(stdin); // initialize to read from stdin
         int fd[2]; // keep track of fdin and fdout for each process
-        
-        // create root child process
-        if (pipe(fd) < 0) { printf("Pipe creation failed\n"); return EXIT_CHILD; }
-        pid = fork();
 
-        // if child process successfully created, check if process is parent or child
-        if (pid == 0) { // we're the child process!
-            int i;
-            gpid = getpid();
-            printf("gpid: %d\n", gpid);
-            for (i = 0; i < npipe; ++i) {
-                if (pipe(fd) < 0) { printf("Pipe creation failed\n"); return EXIT_CHILD; }
-                // carry the write in into the read
-                runarg(gpid, fdin, fd[1], &(cmds[i][1]));
-                // close write end of pipe
+        int i;
+        for (i = 0; i < npipe + 1; ++i) {
+            if (i < npipe) {
+                if (pipe(fd) < 0) printf("Piping failed\n");
+            }
+            if ((pid = fork()) == 0) {
+                if (fdin != fileno(stdin) && i < npipe) {
+                    dup2(fdin, fileno(stdin));
+                    close(fdin);
+                }
+
+                int fdout = fd[1];
+                if (fdout != fileno(stdout) && i < npipe) {
+                    dup2(fdout, fileno(stdout));
+                    close(fdout);
+                }
+                
+                if (i == npipe) dup2(fdin, fileno(stdin));
+                execvp(job->cmds[i][1], &(job->cmds[i][1]));
+            } else if (pid < 0) {
+                printf("Fork failed\n");
+            } else {
+                // if (job->foreground) {
+                //     int stat;
+                //     printf("the pid is %d\n", pid);
+                //     waitpid(pid, &stat, WUNTRACED | WNOHANG);
+                // }
+                if (i == 0) {
+                    pgid = pid;
+                    job->pgid = pid;
+                    setpgid(pid, pgid);
+                } else {
+                    setpgid(pid, pgid);
+                }
+            }
+            if (i < npipe) {
                 close(fd[1]);
-                // keep read end of pipe, next child will read from here
                 fdin = fd[0];
-            }
-            if (fdin != fileno(stdin)) dup2(fdin, fileno(stdin));
-            
-            // execvp clears memory space, so no frees are needed
-            execvp(cmds[i][1], &(cmds[i][1]));
-        } else { // we're the parent process
-            int stat;
-            wait(&stat);
-            // exit with error if child process call fails
-            if (WEXITSTATUS(stat) != 0) {
-                return EXIT_CHILD;
-            }
+            }   
         }
+
+        
     }
     return 0;
 }
@@ -107,6 +114,10 @@ int runargs(int npipe, char **cmds[]) {
  *  int: -1 on error, 1 if shell should be clean exited, and 0 otherwise
 */
 int readline(FILE* stream) {
+    // create a new job that will run this line of the shell
+    Job *job = malloc(sizeof(Job));
+
+    // set up line parser variables
     char *line = NULL;
     size_t len = 0;
     ssize_t linelen;
@@ -119,14 +130,9 @@ int readline(FILE* stream) {
     }
     
     // parse line into command & args
-    /** NOTE: execvp expects char *const argv[], where
-     * argv[0] contains the command name,
-     * each arg is a string (i.e. terminated by \0)
-     * the whole array is terminated with NULL (argv[nargs + 1] = NULL)
-    **/
     int maxArgs = MAX_ARGS;
-    char **args = calloc(MAX_ARGS, sizeof(char*));
-    for (int i = 0; i < MAX_ARGS; i++) args[i] = calloc(BUFFER_SIZE, sizeof(char));
+    job->args = calloc(MAX_ARGS, sizeof(char*));
+    for (int i = 0; i < MAX_ARGS; i++) job->args[i] = calloc(BUFFER_SIZE, sizeof(char));
     int nargs = 0;
     int counter = 0; // iterates through cmd/args
     for (int i = 0; i < linelen; i++) {
@@ -134,19 +140,19 @@ int readline(FILE* stream) {
         if (nargs >= maxArgs) {
             char temp[maxArgs][BUFFER_SIZE];
             for (int arg = 0; arg < nargs; arg++) {
-                strcpy(temp[arg], args[arg]);
-                free(args[arg]);
+                strcpy(temp[arg], job->args[arg]);
+                free(job->args[arg]);
             }
-            free(args);
-            args = calloc(maxArgs *= 2, sizeof(char*));
+            free(job->args);
+            job->args = calloc(maxArgs *= 2, sizeof(char*));
             for (int arg = 0; arg <= maxArgs; arg++) {
-                args[arg] = calloc(BUFFER_SIZE, sizeof(char));
-                if (arg < nargs) strcpy(args[arg], temp[arg]);
+                job->args[arg] = calloc(BUFFER_SIZE, sizeof(char));
+                if (arg < nargs) strcpy(job->args[arg], temp[arg]);
             }
         }
         if (line[i] == ' ' || line[i] == '\n') {
             // convert to string
-            args[nargs][counter] = '\0';
+            job->args[nargs][counter] = '\0';
 
             // break on newline, since end of line reached
             if (line[i] == '\n') break;
@@ -157,83 +163,82 @@ int readline(FILE* stream) {
             continue;
         }
         
-        args[nargs][counter++] = line[i];
+        job->args[nargs][counter++] = line[i];
     }
-    args[nargs + 1] = NULL;
+    job->args[nargs + 1] = NULL;
 
     // TODO: remove
     // test print to show what parsed cmd & args are
     // for (int i = 0; i < maxArgs; i++) {
-    //     printf("arg %d is: %s\n", i, args[i]);
+    //     printf("arg %d is: %s\n", i, job->args[i]);
     // }
+
+    if (!strcmp(job->args[nargs], "&")) job->foreground = false;
+    else job->foreground = true;
+    // assign the process an id and send other processes to background as necessary
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (job->foreground && jobs[i] != NULL) jobs[i]->foreground = false;
+        if (jobs[i] == NULL) {
+            job->id = i;
+            jobs[i] = job;
+        }
+    }
 
     // parse pipe characters so that args can be piped
     int npipe = 0;
-    for (int i = 0; i < nargs; i++) { if (!strcmp(args[i], "|")) npipe++; }
-    char ***cmds = calloc(npipe + 1, sizeof(char**)); // # of cmds will always be # of pipes + 1
+    for (int i = 0; i < nargs; i++) { if (!strcmp(job->args[i], "|")) npipe++; }
+    job->cmds = calloc(npipe + 1, sizeof(char**)); // # of cmds will always be # of pipes + 1
     for (int i = 0; i < npipe + 1; i++) {
-        cmds[i] = calloc(maxArgs, sizeof(char*));
+        job->cmds[i] = calloc(maxArgs, sizeof(char*));
         for (int j = 0; j < maxArgs; j++) {
-            cmds[i][j] = calloc(BUFFER_SIZE, sizeof(char));
+            job->cmds[i][j] = calloc(BUFFER_SIZE, sizeof(char));
         }
     }
 
     int arg = 0; // index of arg from args
     int cmd = 0; // which cmd we're on
     int cmdArg = 0; // which arg of this cmd we're on
-    printf("%d\n", arg);
-    while (args[arg] != NULL) {
+    while (job->args[arg] != NULL) {
         // if (args[arg + 1] == NULL) printf("next is null\n");
-        if (!strcmp(args[arg], "|")) {
+        if (!strcmp(job->args[arg], "|")) {
             if (arg == nargs) { // last arg is a pipe
                 printf("Pipe has no target\n");
                 free(line); 
-                for (int i = 0; i < maxArgs; i++) free(args[i]);
-                free(args);
-                for (int i = 0; i < npipe + 1; i++) {
-                    free(cmds[i]);
-                    for (int j = 0; j < maxArgs; j++) {
-                        free(cmds[i][j]);
-                    }
-                }
-                free(cmds);
+                killJob(job->id);
+                job = NULL;
+                free(job);
                 return -1;
             }
-            cmds[cmd][cmdArg + 1] = NULL;
-            cmds[cmd++][0][0] = cmdArg - 1; // store # of args for cmd in 0 index
+            job->cmds[cmd][cmdArg + 1] = NULL;
+            job->cmds[cmd++][0][0] = cmdArg - 1; // store # of args for cmd in 0 index
             cmdArg = 0;
             arg++;
         }
         // reserve cmds[cmd][0] for # of args for that command
-        strcpy(cmds[cmd][1 + cmdArg++], args[arg++]);
+        strcpy(job->cmds[cmd][1 + cmdArg++], job->args[arg++]);
     }
     // write null terminator and number of args for last arg (won't have pipe)
-    cmds[cmd][cmdArg + 1] = NULL;
-    cmds[cmd++][0][0] = cmdArg - 1;
+    job->cmds[cmd][cmdArg + 1] = NULL;
+    job->cmds[cmd++][0][0] = cmdArg - 1;
 
     // TODO: remove
     // test print to see if pipes are being parsed properly
     // for (int i = 0; i < npipe + 1; i++) {
-    //     printf("number of args: %d\n", cmds[i][0][0]);
+    //     printf("number of args: %d\n", job->cmds[i][0][0]);
     //     for (int j = 0; j < maxArgs; j++) {
-    //         printf("(%d) arg %d is: %s\n", i, j, cmds[i][j]);
+    //         printf("(%d) arg %d is: %s\n", i, j, job->cmds[i][j]);
     //     }
     // }
 
-    // call cmd list
-    int err = runargs(npipe, cmds);
+    printf("The PID of the shell is: %d\n", getpid());
 
-    // free all line parsing variables
+    // call cmd list
+    int err = runargs(npipe, job);
+
+    // free line parser
     free(line); 
-    for (int i = 0; i < maxArgs; i++) free(args[i]);
-    free(args);
-    for (int i = 0; i < npipe + 1; i++) {
-        for (int j = 0; j < maxArgs; j++) {
-            free(cmds[i][j]);
-        }
-        free(cmds[i]);
-    }
-    free(cmds);
+    job = NULL;
+    free(job);
 
     return err;
 }
@@ -248,7 +253,7 @@ int interactive(void) {
     // print initial prompt
     printf("wsh> ");
 
-    while (1) {
+    while (true) {
         int err;
         if ((err = readline(stdin)) < 0) return -1;
         else if (err == 1) return 0;
@@ -271,7 +276,7 @@ int batch(char* filename) {
     FILE *fp;
     if ((fp = fopen(filename, "r")) == NULL) { printf("Unable to open batch file\n"); return -1; }
     
-    while (1) {
+    while (true) {
         int err;
         if ((err = readline(fp)) < 0) return -1;
         else if (err == 1) return 0;
