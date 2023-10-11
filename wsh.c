@@ -315,7 +315,6 @@ int readline(FILE* stream) {
     int cmd = 0; // which cmd we're on
     int cmdArg = 0; // which arg of this cmd we're on
     while (job->args[arg] != NULL) {
-        // if (args[arg + 1] == NULL) printf("next is null\n");
         if (!strcmp(job->args[arg], "&") && arg == nargs) break;
         if (!strcmp(job->args[arg], "|")) {
             if (arg == nargs) { // last arg is a pipe
